@@ -1,0 +1,16 @@
+# Python/Django
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+
+# Environment
+.env
+.venv/
+venv/
+ENV/
+
+# Media
+media/
