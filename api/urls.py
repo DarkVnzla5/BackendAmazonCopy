@@ -20,7 +20,4 @@ urlpatterns = [
     path('dashboard/', dashboard_view, name='dashboard'),
     path('signup/', UserViewSet.as_view({'post': 'create'}), name='signup'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
-]
-
-if settings.DEBUG:
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

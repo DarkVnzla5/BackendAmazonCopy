@@ -7,18 +7,19 @@ from rest_framework.exceptions import ValidationError
 from django.shortcuts import get_object_or_404
 from .models import Product, Cart, CartItem, User, Order, ProductImage
 from .serializers import (ProductSerializer, CartSerializer, CartItemSerializer, UserSerializer, OrderSerializer, ProductImageSerializer)
+from .permissions import (IsAdminOrReadOnly, IsOwnerOrAdmin)
 
 
 class ProductViewSet(viewsets.ModelViewSet):
     queryset=Product.objects.all().order_by('-created_at')
     serializer_class=ProductSerializer
-    permission_classes=[permissions.IsAuthenticatedOrReadOnly]
+    permission_classes=[IsAdminOrReadOnly]
     parser_classes=[parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser]
 
 class ProductImageViewSet(viewsets.ModelViewSet):
     queryset=ProductImage.objects.all()
     serializer_class=ProductImageSerializer
-    permission_classes=[permissions.IsAuthenticatedOrReadOnly]
+    permission_classes=[IsAdminOrReadOnly]
     parser_classes=[parsers.MultiPartParser, parsers.FormParser]
     
     def get_queryset(self):
@@ -30,7 +31,13 @@ class ProductImageViewSet(viewsets.ModelViewSet):
 class OrderViewSet(viewsets.ModelViewSet):
     queryset=Order.objects.select_related('product').all().order_by('-created_at')
     serializer_class=OrderSerializer
-    permission_classes=[permissions.IsAuthenticated]
+    permission_classes=[IsOwnerOrAdmin, permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user=self.request.user
+        if user.role in ['ADMIN','STAFF']:
+            return self.queryset
+        return self.queryset.filter(user=user)
     
 class UserViewSet(viewsets.ModelViewSet):
     queryset=User.objects.all()
@@ -109,22 +116,39 @@ class UserViewSet(viewsets.ModelViewSet):
 class CartViewSet(viewsets.ModelViewSet):
     queryset= Cart.objects.all()
     serializer_class=CartSerializer
-    permission_classes=[permissions.IsAuthenticated]
+    permission_classes=[permissions.IsAuthenticated, IsOwnerOrAdmin]
     
     def get_queryset(self):
-        if self.request.user.is_staff:
-            return Cart.objects.all()
-        return Cart.objects.filter(user=self.request.user)
-    def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
-    @action(detail=False, methods=['get'])
-    def current_cart(self,request):
+       user=self.request.user
+       if user.role in ['ADMIN','STAFF']:
+        return Cart.objects.all()
+       return Cart.objects.filter(user=user)
+    
+    def create(self, request, *args, **kwargs):
+        user=request.user
+        product_id = request.data.get('product_id') or request.data.get('product')
+        if not product_id:
+            return Response(
+                {"detail": "El Codigo del producto es requerido."},
+                status=400
+            ) 
         try:
-            cart=Cart.objects.get_or_create(user=request.user)
-            serializer=self.get_serializer(cart)
-            return Response(serializer.data)
-        except Cart.DoesNotExist:
-            return Response({"detail":"No active cart found."}, status=404) 
+            quantity=int(request.data.get('quantity',1))
+            if quantity<=0:
+                return Response({"detail":"La cantidad debe ser mayor a 0."}, status=400)
+        except (ValueError, TypeError):
+            return Response({"detail":"La cantidad debe ser un número válido."}, status=400)
+        cart, _= Cart.objects.get_or_create(user=user)
+        product= get_object_or_404(Product, pk=product_id)
+
+        cart_item, created= CartItem.objects.get_or_create(cart=cart, product=product,
+        defaults={'quantity':0, 'current_price':product.price})
+
+        cart_item.quantity+=quantity
+        cart_item.save()
+        serializer=CartItemSerializer(cart_item)
+        status_code=201 if created else 200
+        return Response(serializer.data, status=status_code)
     
 class CartItemViewSet(viewsets.ModelViewSet):
     queryset=CartItem.objects.select_related('cart', 'product').all()
@@ -132,39 +156,34 @@ class CartItemViewSet(viewsets.ModelViewSet):
     permission_classes=[permissions.IsAuthenticated]
     
     def get_queryset(self):
-        if self.request.user.is_staff:
-            return self.queryset.all()
-        return CartItem.objects.select_related('product').filter(cart__user=self.request.user)
+       user=self.request.user
+       if user.role in ['ADMIN','STAFF']:
+        return self.queryset
+       return self.queryset.filter(cart__user=user)
     
-    def perform_create(self, serializer):
+    def create(self, request, *args, **kwargs):
         user=self.request.user
-        product_id=self.request.data.get('product_id') or self.request.data.get('product')
+        product_id= request.data.get('product_id') or request.data.get('product')
         try:
-            quantity=int(self.request.data.get('quantity', 1))
+            quantity=int(request.data.get('quantity', 1))
             if quantity<=0:
-                raise ValueError("Quantity must be a positive.")
-        except ValueError:
-            raise serializers.ValidationError({"quantity":"Quantity must be a valid number."})
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise serializers.ValidationError({"quantity":"La cantidad debe ser un número válido."})
         
         cart, _ =Cart.objects.get_or_create(user=user)
-        try:
-            product=Product.objects.get(pk=product_id)
-        except Product.DoesNotExist:
-            raise serializers.ValidationError({"product_id:":"Product does not exist"})
+        product= get_object_or_404(Product, pk=product_id)
         try:
             cart_item=CartItem.objects.get(cart=cart, product=product)
             cart_item.quantity+=int(quantity)
-            cart_item.clean()
             cart_item.save()
-            response_serializer=self.get_serializer(cart_item)
-            return Response(response_serializer.data, status=200)
-                    
+            serializer=self.get_serializer(cart_item)
+            return Response(serializer.data, status=200)
         except CartItem.DoesNotExist:
-            try:
-                serializer.save(cart=cart, product=product, quantity=quantity, current_price=product.price)
-            except ValidationError as e:
-                error_detail=e.message_dict if hasattr(e, 'message_dict') else {'detail': e.messages}
-                raise serializers.ValidationError({"validation_error": error_detail})
+            serializer=self.get_serializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            serializer.save(cart=cart, product=product, quantity=quantity, current_price=product.price)
+            return Response(serializer.data, status=201)
     
     def perform_update(self, serializer):
         try:
@@ -192,8 +211,8 @@ def login_view(request):
         return Response({"message": "Email y contraseña son requeridos"}, status=400)
 
     try:
-        user_object = User.objects.get(email=email)
-        user = authenticate(username=user_object.username, password=password)
+        user_obj = User.objects.get(email=email)
+        user = authenticate(username=user_obj.username, password=password)
     except User.DoesNotExist:
         return Response({"message": "Usuario no encontrado"}, status=404)
     if user:
@@ -201,6 +220,8 @@ def login_view(request):
         return Response({
             "id": user.id,
             "email": user.email,
+            "role": user.role,
+            "username": user.username,
             "name": f"{user.first_name} {user.last_name}",
             "access": str(refresh.access_token),
             "refresh": str(refresh),

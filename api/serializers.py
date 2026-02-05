@@ -4,7 +4,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from .models import Product, Order, User, Cart, CartItem, ProductImage
 
 class ProductImageSerializer(serializers.ModelSerializer):
-    image = serializers.ImageField(use_url=True)
+    image = serializers.SerializerMethodField()
 
     class Meta:
         model = ProductImage
@@ -44,9 +44,26 @@ class ProductSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         request= self.context.get('request')
         images_data = request.FILES.getlist('images')
+        
+        # Debug logging
+        print("=== DEBUG CREATE PRODUCT ===")
+        print(f"FILES keys: {list(request.FILES.keys())}")
+        print(f"FILES: {request.FILES}")
+        print(f"images_data from 'images': {images_data}")
+        
+        # Also check for 'image' (singular) as fallback
+        if not images_data:
+            single_image = request.FILES.get('image')
+            if single_image:
+                images_data = [single_image]
+                print(f"Found single image: {single_image}")
+        
         product = Product.objects.create(**validated_data)
         for index,image_file in enumerate(images_data):
+            print(f"Creating ProductImage for: {image_file}")
             ProductImage.objects.create(product=product, image=image_file, is_main=index==0)
+        
+        print(f"Total images created: {len(images_data)}")
         return product
         
 
@@ -59,7 +76,6 @@ class ProductSerializer(serializers.ModelSerializer):
         instance.save()
 
         if images_data:
-            instance.images.all().delete()
             for image_file in images_data:
                 ProductImage.objects.create(product=instance, image=image_file)
         return instance
@@ -118,7 +134,7 @@ class CartItemSerializer(serializers.ModelSerializer):
         except DjangoValidationError as e:
             raise serializers.ValidationError(getattr(e,'message_dict', e.messages))
     
-def validate_quantity(self,value):
+    def validate_quantity(self,value):
         if value<1:
             raise serializers.ValidationError("La cantidad debe ser al menos 1")
         return value
